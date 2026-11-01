@@ -514,17 +514,19 @@
 
     // Compute effective thresholds based on sensitivity setting.
     // 'strict'   = use calibrated values as-is (highest precision)
-    // 'balanced' = relax a bit (default; helps with generic embeddings)
+    // 'balanced' = relax score/junk slightly, but keep a margin floor to avoid false positives
     // 'loose'    = very permissive (shows best guess even if not confident)
     effectiveThresholds(T) {
       const s = settings.sens || 'balanced';
       if (s === 'strict') return { score: T.score, junk: T.junk, margin: T.margin };
       if (s === 'loose')  return { score: 0.30, junk: -1,   margin: 0 };
-      // balanced
+      // balanced: relax score and junk, but keep a small margin floor
+      // margin=0 caused false positives (e.g. Uta shown instead of Streussen)
+      // because any tiny score difference was accepted even when the model was confused
       return {
         score:  Math.max(0.35, T.score  - 0.15),
         junk:   Math.max(-1,   T.junk   - 0.05),
-        margin: 0,
+        margin: Math.max(0.01, T.margin * 0.5),   // keep at least half the calibrated margin
       };
     }
 

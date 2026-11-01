@@ -556,35 +556,63 @@ def main():
     print("5/6 calibrating thresholds on held-out strong augmentations")
     P = dequantize(q)
     rng_test = random.Random(args.seed + 1)
-    idx = rng_test.sample(range(len(paths)), min(600, len(paths)))
-    test = [video_like(Image.open(paths[i]), rng_test, strong=True) for i in idx]
-    te = emb(test)
+    idx = rng_test.sample(range(len(paths)), min(800, len(paths)))
+
+    # Calibrate on BOTH physical and digital augmentations to cover real-world cases
+    test_imgs = []
+    test_physical_flags = []
+    for i in idx:
+        # alternate: half physical, half digital
+        is_phys = (len(test_imgs) % 2 == 0)
+        test_imgs.append(video_like(Image.open(paths[i]), rng_test, strong=True, physical=is_phys))
+        test_physical_flags.append(is_phys)
+
+    te = emb(test_imgs)
     sims = te @ P.T
     sims_cards = sims[:, :-1]
     order = np.argsort(-sims_cards, axis=1)
     keys = np.array([f["b"] for f in faces])
     scores, margins, gaps, hit_face, hit_card = [], [], [], 0, 0
+    scores_phys, hit_card_phys = [], 0
     for r, i in enumerate(idx):
         top = order[r]
         t1 = top[0]
         # runner-up among *different* cards (printings of one card don't compete)
         t2 = next(j for j in top[1:] if keys[j] != keys[t1])
-        scores.append(sims_cards[r, t1])
-        margins.append(sims_cards[r, t1] - sims_cards[r, t2])
-        gaps.append(sims_cards[r, t1] - sims[r, -1])
+        sc = sims_cards[r, t1]
+        mg = sims_cards[r, t1] - sims_cards[r, t2]
+        gp = sims_cards[r, t1] - sims[r, -1]
+        scores.append(sc)
+        margins.append(mg)
+        gaps.append(gp)
+        is_correct = keys[t1] == keys[i]
         hit_face += int(t1 == i)
-        hit_card += int(keys[t1] == keys[i])
-    jt = emb(junk_images(paths, random.Random(args.seed + 2), 300))
+        hit_card += int(is_correct)
+        if test_physical_flags[r]:
+            scores_phys.append(sc)
+            hit_card_phys += int(is_correct)
+
+    jt = emb(junk_images(paths, random.Random(args.seed + 2), 400))
     junk_top = (jt @ P[:-1].T).max(1)
     scores, margins, gaps = map(np.array, (scores, margins, gaps))
-    thr_score = float(np.clip((np.percentile(junk_top, 95) + np.percentile(scores, 10)) / 2, 0.3, 0.85))
+
+    # Use stricter threshold strategy to avoid false positives:
+    # - score threshold: midpoint between worst-true (p15) and best-junk (p95), min 0.35
+    # - junk gap: must clearly beat junk prototype — use p15 (not p10), scale 0.7 (not 0.5)
+    # - margin: must clearly beat runner-up — use p15, scale 0.7 to avoid confusing similar arts
+    thr_score = float(np.clip(
+        (np.percentile(junk_top, 95) + np.percentile(scores, 15)) / 2, 0.35, 0.85))
     thresholds = {
         "score": round(thr_score, 3),
-        "junk": round(float(np.clip(np.percentile(gaps, 10) * 0.5, 0.0, 0.1)), 3),
-        "margin": round(float(np.clip(np.percentile(margins, 10) * 0.5, 0.005, 0.08)), 3),
+        "junk":  round(float(np.clip(np.percentile(gaps, 15) * 0.7, 0.0, 0.15)), 3),
+        "margin": round(float(np.clip(np.percentile(margins, 15) * 0.7, 0.01, 0.12)), 3),
     }
+    n_phys = sum(test_physical_flags)
     print(f"  simulated top-1: card {hit_card / len(idx):.1%} (exact printing {hit_face / len(idx):.1%})")
-    print(f"  true score p10 {np.percentile(scores, 10):.3f} | non-card top score p95 {np.percentile(junk_top, 95):.3f}")
+    if n_phys:
+        print(f"  physical only:   card {hit_card_phys / n_phys:.1%}")
+    print(f"  true score p15 {np.percentile(scores, 15):.3f} | non-card top score p95 {np.percentile(junk_top, 95):.3f}")
+    print(f"  margin p15 {np.percentile(margins, 15):.3f} | gap p15 {np.percentile(gaps, 15):.3f}")
     print(f"  thresholds: {thresholds}")
     print("  (simulation, not real streams: expect lower accuracy on real video)")
 
