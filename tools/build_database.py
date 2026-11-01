@@ -168,35 +168,189 @@ def squash(im):
     return im.convert("RGB").resize((ID_SIZE, ID_SIZE), Image.BICUBIC)
 
 
-def video_like(im, rng, strong=False):
-    """Mimic a card seen in a compressed stream: shrunk, blurred, colour-shifted,
-    slightly mis-cropped and re-encoded as JPEG."""
+def _perspective_warp(im, rng, strength=0.12):
+    """Simulate a card held at an angle: apply a random perspective transform."""
+    try:
+        import PIL.ImageTransform  # noqa: F401 — check it's available
+        w, h = im.size
+        s = strength
+        # Four corner offsets: each corner shifts by a random fraction of its dimension
+        def rp(scale): return rng.uniform(-scale, scale)
+        coeffs_input = [
+            (rp(s)*w, rp(s)*h),          # top-left
+            (w + rp(s)*w, rp(s)*h),      # top-right
+            (w + rp(s)*w, h + rp(s)*h),  # bottom-right
+            (rp(s)*w, h + rp(s)*h),      # bottom-left
+        ]
+        # PIL PERSPECTIVE needs the 8 coefficients of the projective transform
+        # Compute them from the 4 corner mappings (src = corners of the image)
+        src = [(0, 0), (w, 0), (w, h), (0, h)]
+        dst = coeffs_input
+        # solve A * coeff = b for the 8 perspective coefficients
+        A, b = [], []
+        for (sx, sy), (dx, dy) in zip(src, dst):
+            A += [[sx, sy, 1, 0, 0, 0, -dx*sx, -dx*sy],
+                  [0, 0, 0, sx, sy, 1, -dy*sx, -dy*sy]]
+            b += [dx, dy]
+        try:
+            coeffs = np.linalg.solve(np.array(A, dtype=np.float64), np.array(b, dtype=np.float64)).tolist()
+            return im.transform((w, h), Image.PERSPECTIVE, coeffs, Image.BICUBIC)
+        except np.linalg.LinAlgError:
+            return im
+    except Exception:
+        return im
+
+
+def _add_noise(im, rng, amount=0.04):
+    """Camera sensor noise / grain."""
+    arr = np.asarray(im).astype(np.float32)
+    noise = np.random.default_rng(rng.randint(0, 2**30)).normal(0, amount * 255, arr.shape)
+    return Image.fromarray(np.clip(arr + noise, 0, 255).astype(np.uint8))
+
+
+def _motion_blur(im, rng, max_px=5):
+    """Horizontal or vertical motion blur (camera shake / card movement)."""
+    px = rng.randint(2, max_px)
+    if rng.random() < 0.5:
+        kernel = ImageFilter.Kernel((px * 2 + 1, 1), [1] * (px * 2 + 1), scale=px * 2 + 1)
+    else:
+        kernel = ImageFilter.Kernel((1, px * 2 + 1), [1] * (px * 2 + 1), scale=px * 2 + 1)
+    try:
+        return im.filter(kernel)
+    except Exception:
+        return im.filter(ImageFilter.GaussianBlur(px * 0.5))
+
+
+def _holo_glare(im, rng):
+    """Simulate holographic/foil glare on physical cards: a bright, often
+    rainbow-tinted streak sweeping across the card."""
+    arr = np.asarray(im).astype(np.float32)
+    h, w = arr.shape[:2]
+    # random streak angle
+    angle = rng.uniform(0, np.pi)
+    cx, cy = rng.uniform(0.1, 0.9) * w, rng.uniform(0.1, 0.9) * h
+    xs = np.arange(w)[None, :] - cx
+    ys = np.arange(h)[:, None] - cy
+    # distance from streak line
+    dist = abs(xs * np.sin(angle) - ys * np.cos(angle))
+    width = rng.uniform(0.05, 0.25) * min(w, h)
+    streak = np.exp(-(dist / width) ** 2) * rng.uniform(40, 130)
+    # slight colour tint (rainbow effect)
+    tint = np.array([rng.uniform(0.7, 1.3), rng.uniform(0.7, 1.3), rng.uniform(0.7, 1.3)])
+    glare = streak[:, :, None] * tint[None, None, :]
+    return Image.fromarray(np.clip(arr + glare, 0, 255).astype(np.uint8))
+
+
+def _finger_shadow(im, rng):
+    """A dark curved shadow at the edge — as if someone is holding the card."""
+    arr = np.asarray(im).astype(np.float32)
+    h, w = arr.shape[:2]
+    side = rng.randint(0, 3)
+    t = np.linspace(0, 1, w if side in (0, 2) else h)
+    shadow = (1 - np.exp(-t * rng.uniform(3, 8))) * rng.uniform(0.3, 0.65)
+    if side == 0:    # top
+        mask = shadow[None, :, None] * np.ones((h, 1, 1))
+        mask = mask.T.reshape(1, w, 1) * np.linspace(1, 0, h)[:, None, None]
+    elif side == 1:  # bottom
+        mask = np.linspace(0, 1, h)[:, None, None] * rng.uniform(0.3, 0.6)
+        mask = mask * (1 - np.linspace(0, 1, w)[None, :, None] * 0)
+    elif side == 2:  # left
+        mask = np.linspace(1, 0, w)[None, :, None] * rng.uniform(0.3, 0.6)
+    else:            # right
+        mask = np.linspace(0, 1, w)[None, :, None] * rng.uniform(0.3, 0.6)
+    arr = arr * (1 - np.clip(mask, 0, 0.7))
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+
+
+def video_like(im, rng, strong=False, physical=None):
+    """Mimic a card seen in a stream. physical=True simulates a real physical card
+    (holographic glare, finger shadows, perspective, camera noise); physical=False
+    simulates digital card art on screen; physical=None chooses randomly."""
     im = im.convert("RGB")
     w, h = im.size
+
+    # decide physical vs digital
+    if physical is None:
+        physical = rng.random() < 0.55  # slightly bias toward physical (harder case)
+
     # sloppy detector box: crop/extend each side by a few percent
-    m = 0.05 if strong else 0.03
-    l, t, r, b = (rng.uniform(-m, m) * w, rng.uniform(-m, m) * h, w + rng.uniform(-m, m) * w, h + rng.uniform(-m, m) * h)
+    m = 0.06 if strong else 0.04
+    l = rng.uniform(-m, m) * w
+    t = rng.uniform(-m, m) * h
+    r = w + rng.uniform(-m, m) * w
+    b = h + rng.uniform(-m, m) * h
     im = im.crop((int(l), int(t), int(r), int(b)))
-    # slight tilt
-    im = im.rotate(rng.uniform(-6, 6) if strong else rng.uniform(-3, 3), resample=Image.BICUBIC, expand=False, fillcolor=(20, 20, 20))
-    # low resolution (a card is often ~100-200 px tall in a 720p stream)
-    short = rng.choice([70, 90, 120, 160, 220] if strong else [110, 150, 200, 260])
+
+    # perspective warp (physical cards at an angle)
+    if physical and rng.random() < 0.75:
+        strength = rng.uniform(0.06, 0.20 if strong else 0.14)
+        im = _perspective_warp(im, rng, strength)
+    elif rng.random() < 0.3:  # digital: slight tilt only
+        im = _perspective_warp(im, rng, 0.04)
+
+    # rotation
+    max_rot = 12 if (strong and physical) else (8 if strong else 5)
+    im = im.rotate(rng.uniform(-max_rot, max_rot), resample=Image.BICUBIC, expand=False,
+                   fillcolor=(rng.randint(0, 30), rng.randint(0, 30), rng.randint(0, 30)))
+
+    # resolution (physical cards on stream: often 80-180 px; digital: can be sharper)
+    if physical:
+        short = rng.choice([70, 85, 100, 130, 170, 220] if strong else [90, 120, 160, 210])
+    else:
+        short = rng.choice([100, 130, 170, 220, 280] if strong else [150, 200, 260, 320])
     s = short / min(im.size)
     im = im.resize((max(8, int(im.size[0] * s)), max(8, int(im.size[1] * s))), Image.BILINEAR)
-    if rng.random() < 0.6:
-        im = im.filter(ImageFilter.GaussianBlur(rng.uniform(0.3, 1.4 if strong else 0.9)))
-    im = ImageEnhance.Brightness(im).enhance(rng.uniform(0.7, 1.3))
-    im = ImageEnhance.Contrast(im).enhance(rng.uniform(0.75, 1.25))
-    im = ImageEnhance.Color(im).enhance(rng.uniform(0.7, 1.25))
-    if rng.random() < 0.35:  # table glare
+
+    # blur: physical may have focus issues on top of compression
+    blur_p = 0.75 if physical else 0.5
+    if rng.random() < blur_p:
+        max_blur = 2.2 if (strong and physical) else (1.6 if strong else 1.1)
+        im = im.filter(ImageFilter.GaussianBlur(rng.uniform(0.3, max_blur)))
+
+    # motion blur (card being moved / camera shake)
+    if physical and rng.random() < 0.25:
+        im = _motion_blur(im, rng)
+
+    # colour & exposure
+    if physical:
+        # physical cards often under mixed/warm lighting
+        im = ImageEnhance.Brightness(im).enhance(rng.uniform(0.55, 1.5))
+        im = ImageEnhance.Contrast(im).enhance(rng.uniform(0.65, 1.4))
+        im = ImageEnhance.Color(im).enhance(rng.uniform(0.55, 1.4))
+        # warm/cool tint from room lighting
+        if rng.random() < 0.5:
+            arr = np.asarray(im).astype(np.float32)
+            tint = np.array([rng.uniform(0.85, 1.15), rng.uniform(0.85, 1.15), rng.uniform(0.85, 1.15)])
+            im = Image.fromarray(np.clip(arr * tint, 0, 255).astype(np.uint8))
+    else:
+        im = ImageEnhance.Brightness(im).enhance(rng.uniform(0.7, 1.3))
+        im = ImageEnhance.Contrast(im).enhance(rng.uniform(0.75, 1.25))
+        im = ImageEnhance.Color(im).enhance(rng.uniform(0.7, 1.25))
+
+    # holographic / foil glare (physical cards only)
+    if physical and rng.random() < 0.55:
+        im = _holo_glare(im, rng)
+    elif not physical and rng.random() < 0.25:  # screen glare
         arr = np.asarray(im).astype(np.float32)
         gx = np.linspace(-1, 1, arr.shape[1])[None, :, None]
         gy = np.linspace(-1, 1, arr.shape[0])[:, None, None]
         cx, cy = rng.uniform(-1, 1), rng.uniform(-1, 1)
-        glare = np.exp(-((gx - cx) ** 2 + (gy - cy) ** 2) * rng.uniform(1.5, 5)) * rng.uniform(25, 90)
+        glare = np.exp(-((gx - cx) ** 2 + (gy - cy) ** 2) * rng.uniform(1.5, 5)) * rng.uniform(20, 70)
         im = Image.fromarray(np.clip(arr + glare, 0, 255).astype(np.uint8))
+
+    # finger/hand shadow at edge (physical cards being held)
+    if physical and rng.random() < 0.40:
+        im = _finger_shadow(im, rng)
+
+    # camera sensor noise (physical more grainy)
+    if rng.random() < (0.6 if physical else 0.3):
+        amount = rng.uniform(0.02, 0.07 if physical else 0.04)
+        im = _add_noise(im, rng, amount)
+
+    # JPEG compression
+    quality = rng.randint(28 if (strong and physical) else 35, 82)
     buf = io.BytesIO()
-    im.save(buf, "JPEG", quality=rng.randint(30 if strong else 45, 85))
+    im.save(buf, "JPEG", quality=quality)
     return squash(Image.open(io.BytesIO(buf.getvalue())))
 
 
@@ -342,7 +496,8 @@ def main():
     ap.add_argument("--out", default=".", help="extension root (data/ and models/ are written inside)")
     ap.add_argument("--cache", default="./.card-cache", help="where card images are cached")
     ap.add_argument("--backbone", default="dinov2-small", choices=["dinov2-small", "mobilenetv3"])
-    ap.add_argument("--aug", type=int, default=8, help="augmented views per card used for its prototype")
+    ap.add_argument("--aug", type=int, default=16, help="augmented views per card used for its prototype (default 16; more = better but slower)")
+    ap.add_argument("--physical", action="store_true", help="bias augmentations heavily toward physical card simulation (glare, perspective, shadows)")
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--limit", type=int, default=0, help="only use the first N cards (for a quick test)")
     ap.add_argument("--fp16", action="store_true", help="store model weights as fp16 (half the size)")
@@ -377,11 +532,14 @@ def main():
     export_onnx(model, os.path.join(args.out, "models", "embed.onnx"), args.fp16)
     emb = Embedder(model)
 
+    physical_bias = 1.0 if args.physical else None  # None = random per augmentation
     print("4/6 computing prototypes")
     protos = []
     for i, p in enumerate(paths):
         im = Image.open(p).convert("RGB")
-        views = [squash(im)] + [video_like(im, rng) for _ in range(args.aug)]
+        # physical=None lets each augmentation randomly decide digital vs physical
+        # with --physical flag we force physical=True for all augmentations
+        views = [squash(im)] + [video_like(im, rng, physical=True if args.physical else None) for _ in range(args.aug)]
         v = emb(views)
         # the clean scan counts double: it is what the user compares against
         protos.append(unit(unit(v[1:]).mean(0) + 2 * v[0]))
