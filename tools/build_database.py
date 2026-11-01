@@ -242,22 +242,25 @@ def _holo_glare(im, rng):
 
 
 def _finger_shadow(im, rng):
-    """A dark curved shadow at the edge — as if someone is holding the card."""
+    """A dark shadow at the edge — as if someone is holding the card."""
     arr = np.asarray(im).astype(np.float32)
     h, w = arr.shape[:2]
     side = rng.randint(0, 3)
-    t = np.linspace(0, 1, w if side in (0, 2) else h)
-    shadow = (1 - np.exp(-t * rng.uniform(3, 8))) * rng.uniform(0.3, 0.65)
-    if side == 0:    # top
-        mask = shadow[None, :, None] * np.ones((h, 1, 1))
-        mask = mask.T.reshape(1, w, 1) * np.linspace(1, 0, h)[:, None, None]
-    elif side == 1:  # bottom
-        mask = np.linspace(0, 1, h)[:, None, None] * rng.uniform(0.3, 0.6)
-        mask = mask * (1 - np.linspace(0, 1, w)[None, :, None] * 0)
-    elif side == 2:  # left
-        mask = np.linspace(1, 0, w)[None, :, None] * rng.uniform(0.3, 0.6)
-    else:            # right
-        mask = np.linspace(0, 1, w)[None, :, None] * rng.uniform(0.3, 0.6)
+    strength = rng.uniform(0.3, 0.65)
+    if side == 0:    # top: shadow fades from top down
+        t = np.linspace(1, 0, h)[:, None, None]  # (h,1,1)
+        mask = (1 - np.exp(-t * rng.uniform(3, 8))) * strength
+    elif side == 1:  # bottom: shadow fades from bottom up
+        t = np.linspace(0, 1, h)[:, None, None]
+        mask = (1 - np.exp(-(1 - t) * rng.uniform(3, 8))) * strength
+        mask = np.flip(mask, axis=0)
+    elif side == 2:  # left: shadow fades from left right
+        t = np.linspace(1, 0, w)[None, :, None]  # (1,w,1)
+        mask = (1 - np.exp(-t * rng.uniform(3, 8))) * strength
+    else:            # right: shadow fades from right left
+        t = np.linspace(0, 1, w)[None, :, None]
+        mask = (1 - np.exp(-(1 - t) * rng.uniform(3, 8))) * strength
+        mask = np.flip(mask, axis=1)
     arr = arr * (1 - np.clip(mask, 0, 0.7))
     return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
 
