@@ -459,20 +459,46 @@ def export_onnx(model, path, fp16):
 
 
 class Embedder:
-    def __init__(self, model):
-        import torch
-        self.torch = torch
-        self.model = model
-        self.dev = "cuda" if torch.cuda.is_available() else "cpu"
-        self.model.to(self.dev)
+    def __init__(self, model, onnx_path=None):
+        """Se onnx_path for fornecido, usa ONNX Runtime diretamente (backbone arcface).
+        Caso contrário usa PyTorch normalmente."""
+        if onnx_path is not None:
+            # Modo ONNX puro: mais rápido e não precisa de PyTorch no passo 4/6
+            import onnxruntime as ort
+            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            try:
+                self.sess = ort.InferenceSession(onnx_path, providers=providers)
+                used = self.sess.get_providers()[0]
+                print(f"  Embedder usando ONNX Runtime ({used})")
+            except Exception:
+                self.sess = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
+                print("  Embedder usando ONNX Runtime (CPU)")
+            self.model = None
+            self.torch = None
+        else:
+            import torch
+            self.torch = torch
+            self.model = model
+            self.sess = None
+            self.dev = "cuda" if torch.cuda.is_available() else "cpu"
+            self.model.to(self.dev)
 
     def __call__(self, imgs, bs=64):
-        torch = self.torch
         out = []
-        with torch.no_grad():
+        if self.sess is not None:
+            # Modo ONNX
             for i in range(0, len(imgs), bs):
-                arr = np.stack([np.asarray(im, dtype=np.float32) / 255.0 for im in imgs[i:i + bs]]).transpose(0, 3, 1, 2)
-                out.append(self.model(torch.from_numpy(arr).to(self.dev)).cpu().numpy())
+                arr = np.stack([np.asarray(im, dtype=np.float32) / 255.0
+                                for im in imgs[i:i + bs]]).transpose(0, 3, 1, 2)
+                result = self.sess.run(None, {"image": arr})[0]
+                out.append(result)
+        else:
+            torch = self.torch
+            with torch.no_grad():
+                for i in range(0, len(imgs), bs):
+                    arr = np.stack([np.asarray(im, dtype=np.float32) / 255.0
+                                    for im in imgs[i:i + bs]]).transpose(0, 3, 1, 2)
+                    out.append(self.model(torch.from_numpy(arr).to(self.dev)).cpu().numpy())
         return np.concatenate(out)
 
 
@@ -498,7 +524,7 @@ def main():
     ap.add_argument("--lang", default="english", help="punk-records language folder (default: english)")
     ap.add_argument("--out", default=".", help="extension root (data/ and models/ are written inside)")
     ap.add_argument("--cache", default="./.card-cache", help="where card images are cached")
-    ap.add_argument("--backbone", default="dinov2-small", choices=["dinov2-small", "mobilenetv3"])
+    ap.add_argument("--backbone", default="dinov2-small", choices=["dinov2-small", "mobilenetv3", "mobilenetv3-arcface"])
     ap.add_argument("--aug", type=int, default=16, help="augmented views per card used for its prototype (default 16; more = better but slower)")
     ap.add_argument("--physical", action="store_true", help="bias augmentations heavily toward physical card simulation (glare, perspective, shadows)")
     ap.add_argument("--workers", type=int, default=8)
@@ -531,9 +557,21 @@ def main():
     paths = [paths[i] for i in keep]
 
     print(f"3/6 exporting {args.backbone} to ONNX")
-    model = build_model(args.backbone)
-    export_onnx(model, os.path.join(args.out, "models", "embed.onnx"), args.fp16)
-    emb = Embedder(model)
+    onnx_path = os.path.join(args.out, "models", "embed.onnx")
+    if args.backbone == "mobilenetv3-arcface":
+        # O embed.onnx já foi gerado pelo finetune_arcface.py — apenas verifica
+        if not os.path.exists(onnx_path):
+            sys.exit(
+                f"embed.onnx não encontrado em {onnx_path}.\n"
+                "Rode primeiro: python tools/finetune_arcface.py --cache ./.card-cache --out .\n"
+                "Depois rode este script com --backbone mobilenetv3-arcface"
+            )
+        print(f"  usando embed.onnx existente ({os.path.getsize(onnx_path)/1e6:.1f} MB) do finetune_arcface.py")
+        model = None  # não precisa de modelo PyTorch; Embedder vai usar ONNX
+    else:
+        model = build_model(args.backbone)
+        export_onnx(model, onnx_path, args.fp16)
+    emb = Embedder(model, onnx_path if args.backbone == "mobilenetv3-arcface" else None)
 
     physical_bias = 1.0 if args.physical else None  # None = random per augmentation
     print("4/6 computing prototypes")
