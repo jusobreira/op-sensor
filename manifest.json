@@ -1,0 +1,52 @@
+{
+  "manifest_version": 3,
+  "name": "OP Sensor",
+  "version": "0.1.0",
+  "description": "Passe o mouse sobre cartas de One Piece Card Game em vídeos (YouTube, Twitch, Kick, Facebook) e veja a carta em alta resolução, com texto e preço. / Hover One Piece TCG cards in videos to see them in high resolution.",
+  "minimum_chrome_version": "116",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "OP Sensor",
+    "default_popup": "popup.html",
+    "default_icon": { "16": "icons/icon16.png", "32": "icons/icon32.png" }
+  },
+  "background": { "service_worker": "background.js", "type": "module" },
+  "permissions": ["offscreen", "storage", "alarms", "scripting"],
+  "host_permissions": [
+    "https://en.onepiece-cardgame.com/*",
+    "https://optcgapi.com/*",
+    "https://open.er-api.com/*"
+  ],
+  "optional_host_permissions": ["https://*/*", "http://*/*"],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.youtube.com/*",
+        "https://m.youtube.com/*",
+        "https://www.youtube-nocookie.com/embed/*",
+        "https://www.twitch.tv/*",
+        "https://clips.twitch.tv/*",
+        "https://player.twitch.tv/*",
+        "https://kick.com/*",
+        "https://player.kick.com/*",
+        "https://www.facebook.com/*",
+        "https://web.facebook.com/*",
+        "https://m.facebook.com/*",
+        "https://fb.watch/*"
+      ],
+      "js": ["i18n.js", "content/sensor.js"],
+      "all_frames": true,
+      "run_at": "document_idle"
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
+  "cross_origin_embedder_policy": { "value": "require-corp" },
+  "cross_origin_opener_policy": { "value": "same-origin" }
+}

@@ -1,0 +1,17 @@
+# arquivos gerados pelo build — não versionar (são grandes e específicos do computador)
+data/faces.json
+data/protos.bin
+models/embed.onnx
+models/det.onnx
+
+# cache de imagens do build
+.cards-cache/
+
+# Python
+tools/__pycache__/
+tools/*.pyc
+*.pyc
+__pycache__/
+
+# zip de distribuição
+*.zip

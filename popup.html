@@ -1,0 +1,156 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>OP Sensor</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0a0809; --panel: rgba(255, 255, 255, 0.025); --line: rgba(255, 90, 77, 0.16); --line-2: rgba(255, 90, 77, 0.38);
+        --text: #ebe9ee; --muted: #8e8f9c; --dim: #666874; --accent: #ff5a4d; --gold: #ffd666; --green: #4ade80; --red: #f87171;
+        --display: "Bahnschrift", "DIN Alternate", "Segoe UI", sans-serif;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; width: 500px; font: 13px/1.45 "Segoe UI Variable Text", "Segoe UI", Roboto, Arial, sans-serif; color: var(--text);
+        background:
+          radial-gradient(120% 60% at 50% -10%, rgba(255, 90, 77, 0.12), transparent 60%),
+          repeating-linear-gradient(0deg, rgba(255, 90, 77, 0.025) 0 1px, transparent 1px 22px),
+          repeating-linear-gradient(90deg, rgba(255, 90, 77, 0.025) 0 1px, transparent 1px 22px),
+          var(--bg); }
+      header { position: relative; display: flex; align-items: center; gap: 11px; padding: 13px 18px 11px; }
+      header::after { content: ""; position: absolute; left: 18px; right: 18px; bottom: 0; height: 1px;
+        background: linear-gradient(90deg, var(--accent), rgba(255, 90, 77, 0.15) 60%, transparent); }
+      header img { width: 32px; height: 32px; }
+      h1 { margin: 0; font: 600 16px/1.15 var(--display); letter-spacing: 2.2px; text-transform: uppercase; }
+      h1 small { display: block; margin-top: 3px; font: 400 10px/1.2 var(--display); letter-spacing: 0.7px; text-transform: uppercase; color: var(--muted); }
+      main { padding: 11px 18px 12px; display: grid; gap: 10px; }
+      .label { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font: 600 10px/1 var(--display);
+        letter-spacing: 2.2px; text-transform: uppercase; color: rgba(255, 130, 118, 0.85); }
+      .label::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+      .panel { position: relative; padding: 4px 11px; background: var(--panel); border: 1px solid var(--line); border-radius: 3px; }
+      .panel::before, .panel::after { content: ""; position: absolute; width: 9px; height: 9px; border: 0 solid var(--accent); opacity: 0.8; }
+      .panel::before { left: -1px; top: -1px; border-width: 1.5px 0 0 1.5px; }
+      .panel::after { right: -1px; bottom: -1px; border-width: 0 1.5px 1.5px 0; }
+      .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 0; }
+      .row + .row { border-top: 1px solid rgba(255, 255, 255, 0.05); }
+      label.row { cursor: pointer; }
+      input[type=checkbox] { appearance: none; flex: none; position: relative; width: 32px; height: 17px; margin: 0; cursor: pointer;
+        border-radius: 9px; background: #1c1d26; border: 1px solid #3a3b48; transition: background .15s, border-color .15s, box-shadow .15s; }
+      input[type=checkbox]::after { content: ""; position: absolute; top: 2px; left: 2px; width: 11px; height: 11px; border-radius: 50%;
+        background: #8e8f9c; transition: transform .15s, background .15s; }
+      input[type=checkbox]:checked { background: rgba(255, 90, 77, 0.2); border-color: var(--accent); box-shadow: 0 0 8px rgba(255, 90, 77, 0.35); }
+      input[type=checkbox]:checked::after { transform: translateX(15px); background: var(--accent); }
+      input[type=checkbox]:focus-visible, select:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+      .seg { display: inline-flex; gap: 3px; }
+      .seg button { min-width: 30px; padding: 4px 9px; border: 1px solid #3a3b48; background: #15161d; color: #c5c6d0; cursor: pointer;
+        font: 600 11px/1.2 var(--display); letter-spacing: 1px; text-transform: uppercase;
+        clip-path: polygon(5px 0, 100% 0, 100% calc(100% - 5px), calc(100% - 5px) 100%, 0 100%, 0 5px); transition: background .12s, color .12s; }
+      .seg button:hover { color: #fff; border-color: var(--line-2); }
+      .seg button.on { background: var(--accent); border-color: var(--accent); color: #140808; }
+      select { background: #15161d; color: var(--text); border: 1px solid #3a3b48; border-radius: 3px; padding: 4px 6px; font: 12px "Segoe UI", sans-serif; }
+      .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+      .data { padding: 8px 11px; display: grid; gap: 5px; }
+      .how { padding: 8px 11px; color: #b0b1bd; font-size: 12.3px; }
+      .how b { color: var(--gold); font-weight: 600; }
+      .hint { padding: 0 0 6px; color: var(--dim); font-size: 11px; }
+      .note { color: var(--red); font-size: 11px; padding-bottom: 6px; }
+      .status { font: 11px/1.4 Consolas, "Cascadia Mono", monospace; color: var(--muted); }
+      .status.ok::before { content: "● "; color: var(--green); }
+      .status.bad::before { content: "● "; color: var(--red); }
+      .status.bad { color: var(--red); white-space: normal; word-break: break-word; }
+      footer { margin: 0 18px; padding: 8px 0 11px; border-top: 1px solid var(--line); font-size: 10.8px; color: var(--dim); }
+    </style>
+  </head>
+  <body>
+    <header>
+      <img src="icons/icon48.png" alt="" />
+      <h1>OP Sensor<small data-i18n="app_sub"></small></h1>
+    </header>
+    <main>
+      <div class="panel how" id="how"></div>
+      <div class="cols">
+        <section>
+          <div class="label" data-i18n="sec_sensor"></div>
+          <div class="panel">
+            <label class="row"><span data-i18n="show_button"></span> <input type="checkbox" id="enabled" /></label>
+            <label class="row"><span data-i18n="highlight"></span> <input type="checkbox" id="highlight" /></label>
+          </div>
+        </section>
+        <section>
+          <div class="label" data-i18n="sec_display"></div>
+          <div class="panel">
+            <div class="row"><span data-i18n="card_size"></span>
+              <span class="seg" id="size"><button data-v="s">S</button><button data-v="m">M</button><button data-v="l">L</button></span></div>
+            <div class="row"><span data-i18n="button"></span>
+              <span class="seg" id="corner"><button data-v="left" data-i18n="left"></button><button data-v="right" data-i18n="right"></button></span></div>
+          </div>
+        </section>
+      </div>
+      <div class="cols">
+        <section>
+          <div class="label" data-i18n="sec_info"></div>
+          <div class="panel">
+            <label class="row"><span data-i18n="show_effect"></span> <input type="checkbox" id="showEffect" /></label>
+            <label class="row"><span data-i18n="show_price"></span> <input type="checkbox" id="showPrice" /></label>
+          </div>
+        </section>
+        <section>
+          <div class="label" data-i18n="sec_lang"></div>
+          <div class="panel">
+            <div class="row"><span data-i18n="language"></span>
+              <select id="lang">
+                <option value="auto" data-i18n="lang_auto"></option>
+                <option value="en">English</option>
+                <option value="pt">Português</option>
+              </select></div>
+          </div>
+        </section>
+      </div>
+      <section>
+        <div class="label" data-i18n="sec_price"></div>
+        <div class="panel">
+          <div class="row"><span data-i18n="price_source"></span>
+            <select id="priceSource">
+              <option value="liga" data-i18n="store_liga"></option>
+              <option value="tcgplayer" data-i18n="store_tcgplayer"></option>
+              <option value="cardmarket" data-i18n="store_cardmarket"></option>
+            </select></div>
+          <div class="row"><span data-i18n="currency"></span>
+            <span class="seg" id="currency"><button data-v="BRL">R$ BRL</button><button data-v="USD">$ USD</button><button data-v="EUR">€ EUR</button></span></div>
+        </div>
+      </section>
+      <section>
+        <div class="label" data-i18n="sec_sites"></div>
+        <div class="panel">
+          <label class="row"><span data-i18n="all_sites"></span> <input type="checkbox" id="allSites" /></label>
+          <div class="hint" data-i18n="all_sites_hint"></div>
+          <div class="note" id="sitesNote" hidden></div>
+        </div>
+      </section>
+      <section>
+        <div class="label" data-i18n="sec_data"></div>
+        <div class="panel data">
+          <div class="status" id="dataLine"></div>
+          <div class="status" id="status"></div>
+        </div>
+      </section>
+      <section>
+        <div class="label" data-i18n="sec_diag" style="--accent:#ffd666;color:rgba(255,214,102,0.85)">Diagnóstico</div>
+        <div class="panel">
+          <div class="row"><span data-i18n="sensitivity"></span>
+            <span class="seg" id="sens">
+              <button data-v="strict" data-i18n="sens_strict"></button>
+              <button data-v="balanced" data-i18n="sens_balanced"></button>
+              <button data-v="loose" data-i18n="sens_loose"></button>
+            </span>
+          </div>
+          <label class="row"><span data-i18n="debug_mode"></span> <input type="checkbox" id="debug" /></label>
+          <div class="hint" data-i18n="debug_hint"></div>
+        </div>
+      </section>
+    </main>
+    <footer data-i18n="footer"></footer>
+    <script src="i18n.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

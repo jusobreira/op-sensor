@@ -44,4 +44,3 @@ toggles, and "work on any site with a video" (asks Chrome for all-sites permissi
 - The embedding model is generic, not fine-tuned, and alt-art printings look alike:
   expect confusion between a card and its parallel; accuracy on real video is unmeasured.
 - Card data © Eiichiro Oda/Shueisha, Toei Animation, Bandai. Not affiliated with them.
-# op-sensor
