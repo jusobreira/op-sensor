@@ -445,35 +445,20 @@ def train(args):
         tr_loss /= len(tr_dl)
         elapsed = time.time() - t0
 
-        # --- validação: top-1 accuracy por cosine similarity ---
+        # --- validação rápida: usa pesos ArcFace como protótipos (já são centros das classes) ---
         if epoch % args.eval_every == 0 or epoch == args.epochs:
             model.eval()
-            # Calcula protótipos de validação (média dos embeddings por carta)
-            proto_sum = torch.zeros(num_classes, args.dim, device=device)
-            proto_cnt = torch.zeros(num_classes, device=device)
+            # Protótipos = pesos ArcFace normalizados (muito mais rápido que recalcular embeddings)
+            tr_proto = nn.functional.normalize(arc_weight.detach().cpu(), dim=-1)
+
             va_embs, va_lbls = [], []
             with torch.no_grad():
                 for x, y in va_dl:
-                    x = x.to(device)
-                    e = model(x)
-                    va_embs.append(e.cpu())
+                    e = model(x.to(device)).cpu()
+                    va_embs.append(e)
                     va_lbls.extend(y.tolist())
             va_embs = torch.cat(va_embs)
             va_lbls_t = torch.tensor(va_lbls)
-
-            # Usa os embeddings dos dados de TREINO como protótipos
-            tr_proto = torch.zeros(num_classes, args.dim)
-            tr_cnt   = torch.zeros(num_classes)
-            with torch.no_grad():
-                for x, y in DataLoader(CardDataset(tr_paths, tr_labels,
-                                                    lambda im, rng, strong=False: augment(im, rng, strong=False),
-                                                    views_per_card=1),
-                                        batch_size=args.batch, num_workers=args.workers):
-                    e = model(x.to(device)).cpu()
-                    for i, lbl in enumerate(y.tolist()):
-                        tr_proto[lbl] += e[i]
-                        tr_cnt[lbl] += 1
-            tr_proto = nn.functional.normalize(tr_proto / tr_cnt.unsqueeze(1).clamp(min=1), dim=-1)
 
             # Top-1 accuracy
             sims = va_embs @ tr_proto.T
