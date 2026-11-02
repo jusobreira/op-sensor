@@ -262,21 +262,23 @@ def arcface_loss(embeddings, labels, weight, s=16.0, m=0.3):
 
 
 # ------------------------------------------------------------------ modelo
-def build_backbone():
-    """MobileNetV3-Large sem cabeça de classificação → 1280-dim features."""
-    import timm
-    model = timm.create_model(
-        "mobilenetv3_large_100.ra_in1k",
-        pretrained=True,
-        num_classes=0,           # remove classificador
-        global_pool="avg",       # pooling global → vetor
-    )
-    # Descobre a dimensão real de saída do backbone
-    import torch
+def build_backbone(arch="resnet50"):
+    """Backbone pré-treinado sem cabeça de classificação.
+
+    arch: 'resnet50' (padrão, ~25M params, melhor qualidade)
+          'mobilenetv3' (mais leve, ~5M params, mais rápido)
+    """
+    import timm, torch
+    name = {
+        "resnet50":     "resnet50.a1_in1k",
+        "mobilenetv3":  "mobilenetv3_large_100.ra_in1k",
+    }.get(arch, arch)
+    model = timm.create_model(name, pretrained=True, num_classes=0, global_pool="avg")
     with torch.no_grad():
         dummy = torch.zeros(1, 3, 224, 224)
         feat_dim = model(dummy).shape[1]
-    return model, feat_dim       # dim real do MobileNetV3-Large (1280)
+    print(f"  backbone: {name}  feat_dim={feat_dim}")
+    return model, feat_dim
 
 
 class EmbedNet(object):
@@ -383,7 +385,7 @@ def train(args):
 
     # Modelo
     import timm
-    backbone, feat_dim = build_backbone()
+    backbone, feat_dim = build_backbone(args.arch)
     model = EmbedModel(backbone, feat_dim, embed_dim=args.dim).to(device)
 
     # Centros ArcFace (aprendidos junto com o modelo)
@@ -473,6 +475,7 @@ def train(args):
                     "num_classes": num_classes,
                     "dim": args.dim,
                     "acc": acc,
+                    "arch": args.arch,
                 }, ckpt_path)
         else:
             print(f"Época {epoch:3d}/{args.epochs}  loss={tr_loss:.4f}  ({elapsed:.0f}s)")
@@ -490,7 +493,8 @@ def export(args, ckpt_path):
     ckpt = torch.load(ckpt_path, map_location="cpu")
 
     import timm
-    backbone, feat_dim = build_backbone()
+    arch = ckpt.get("arch", "resnet50")
+    backbone, feat_dim = build_backbone(arch)
     model = EmbedModel(backbone, feat_dim, embed_dim=ckpt["dim"])
     model.load_state_dict(ckpt["model"])
     model.eval()
@@ -554,6 +558,8 @@ def main():
     ap.add_argument("--workers",   type=int, default=4, help="DataLoader workers (padrão: 4)")
     ap.add_argument("--eval-every",type=int, default=5, help="Avaliar a cada N épocas (padrão: 5)")
     ap.add_argument("--seed",      type=int, default=42)
+    ap.add_argument("--arch",      default="resnet50", choices=["resnet50","mobilenetv3"],
+                                   help="Backbone: resnet50 (padrão) ou mobilenetv3")
     ap.add_argument("--eval-only", action="store_true", help="Só avalia o checkpoint existente, não treina")
     ap.add_argument("--export-only",action="store_true", help="Só exporta o checkpoint para ONNX")
     args = ap.parse_args()
