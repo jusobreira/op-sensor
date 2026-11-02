@@ -237,33 +237,28 @@ class ArcFaceHead(object):
     pass
 
 
-def arcface_loss(embeddings, labels, weight, s=32.0, m=0.5):
-    """
+def arcface_loss(embeddings, labels, weight, s=16.0, m=0.3):
+    """CosFace/ArcFace híbrido: margem aditiva no cosseno (mais estável que ArcFace puro).
+
     embeddings: [N, D] L2-normalizado
     labels:     [N] inteiros
-    weight:     [num_classes, D] L2-normalizado (centros das classes)
-    s: scale (temperatura inversa) — 32 é padrão para imagens
-    m: margin angular (0.5 rad ≈ 28°) — quanto mais alto, mais estrita a separação
+    weight:     [num_classes, D] (centros das classes, normalizados internamente)
+    s: scale — 16 é mais seguro para muitas classes (3000+)
+    m: margem aditiva no cosseno (CosFace) — 0.3 converge bem
     """
     import torch
     import torch.nn.functional as F
 
-    # cosine similarity entre embeddings e centros
-    cos_theta = F.linear(embeddings, F.normalize(weight))  # [N, C]
+    # cosine similarity entre embeddings e centros normalizados
+    cos_theta = F.linear(embeddings, F.normalize(weight, dim=-1))  # [N, C]
     cos_theta = cos_theta.clamp(-1 + 1e-7, 1 - 1e-7)
 
-    # ângulo target
-    theta = torch.acos(cos_theta)
-
-    # adiciona margem angular apenas na classe correta
+    # CosFace: subtrai margem do cosseno da classe correta (mais estável que ArcFace)
     one_hot = torch.zeros_like(cos_theta)
     one_hot.scatter_(1, labels.unsqueeze(1), 1.0)
-    theta_m = theta + one_hot * m
+    logits = cos_theta - one_hot * m  # [N, C]
 
-    # volta para cosine e aplica scale
-    logits = torch.cos(theta_m) * s
-
-    return F.cross_entropy(logits, labels)
+    return F.cross_entropy(logits * s, labels)
 
 
 # ------------------------------------------------------------------ modelo
@@ -549,12 +544,12 @@ def main():
     ap = argparse.ArgumentParser(description="Fine-tune ArcFace para OP Sensor")
     ap.add_argument("--cache",     required=True, help="Pasta .card-cache com as imagens")
     ap.add_argument("--out",       default=".",   help="Onde salvar o embed.onnx (padrão: .)")
-    ap.add_argument("--epochs",    type=int, default=30, help="Épocas de treino (padrão: 30)")
+    ap.add_argument("--epochs",    type=int, default=60, help="Épocas de treino (padrão: 60)")
     ap.add_argument("--batch",     type=int, default=64, help="Batch size (padrão: 64; reduza se der OOM)")
     ap.add_argument("--dim",       type=int, default=512, help="Dimensão do embedding (padrão: 512)")
     ap.add_argument("--lr",        type=float, default=3e-4, help="Learning rate base (padrão: 3e-4)")
-    ap.add_argument("--scale",     type=float, default=32.0, help="ArcFace scale s (padrão: 32)")
-    ap.add_argument("--margin",    type=float, default=0.5,  help="ArcFace margin m em radianos (padrão: 0.5)")
+    ap.add_argument("--scale",     type=float, default=16.0, help="CosFace scale s (padrão: 16)")
+    ap.add_argument("--margin",    type=float, default=0.3,  help="CosFace margin m no cosseno (padrão: 0.3)")
     ap.add_argument("--views",     type=int, default=3, help="Augmentações por carta por época (padrão: 3)")
     ap.add_argument("--workers",   type=int, default=4, help="DataLoader workers (padrão: 4)")
     ap.add_argument("--eval-every",type=int, default=5, help="Avaliar a cada N épocas (padrão: 5)")
