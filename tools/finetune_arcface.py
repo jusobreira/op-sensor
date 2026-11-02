@@ -445,11 +445,9 @@ def train(args):
         tr_loss /= len(tr_dl)
         elapsed = time.time() - t0
 
-        # --- validação rápida: usa pesos ArcFace como protótipos (já são centros das classes) ---
+        # --- validação rápida: kNN dentro do conjunto de validação ---
         if epoch % args.eval_every == 0 or epoch == args.epochs:
             model.eval()
-            # Protótipos = pesos ArcFace normalizados (muito mais rápido que recalcular embeddings)
-            tr_proto = nn.functional.normalize(arc_weight.detach().cpu(), dim=-1)
 
             va_embs, va_lbls = [], []
             with torch.no_grad():
@@ -457,13 +455,14 @@ def train(args):
                     e = model(x.to(device)).cpu()
                     va_embs.append(e)
                     va_lbls.extend(y.tolist())
-            va_embs = torch.cat(va_embs)
-            va_lbls_t = torch.tensor(va_lbls)
+            va_embs = torch.cat(va_embs)          # [V, D]
+            va_lbls_t = torch.tensor(va_lbls)     # [V]
 
-            # Top-1 accuracy
-            sims = va_embs @ tr_proto.T
-            preds = sims.argmax(dim=1)
-            acc = (preds == va_lbls_t).float().mean().item()
+            # Para cada amostra, acha o vizinho mais próximo EXCLUINDO ela mesma
+            sims = va_embs @ va_embs.T            # [V, V]
+            sims.fill_diagonal_(-2.0)             # exclui auto-similaridade
+            preds = sims.argmax(dim=1)            # índice do vizinho mais próximo
+            acc = (va_lbls_t[preds] == va_lbls_t).float().mean().item()
 
             flag = " ← melhor!" if acc > best_acc else ""
             print(f"Época {epoch:3d}/{args.epochs}  loss={tr_loss:.4f}  "
