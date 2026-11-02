@@ -14,6 +14,9 @@
   const MIN_JUNK_GAP = 0.04;   // ...and it must beat the "not a card" prototype
   const MIN_MARGIN = 0.03;     // ...and the next-best *different* card (near-ties were wrong on real frames)
   const DETECT_TTL_MS = 450;   // how long detections stay fresh on a playing video
+  const VOTE_MIN_AGREE = 2;    // identify passes that must agree on the same card before it's shown
+  const VOTE_WINDOW_MS = 2500; // how long a vote stays valid
+  const VOTE_POS_TOL = 50;     // px tolerance for "same card area" between votes
   const HOST = location.hostname;
   const IS_YT = /(^|\.)youtube(-nocookie)?\.com$/.test(HOST);
   const IS_TWITCH = /(^|\.)twitch\.tv$/.test(HOST);
@@ -162,6 +165,39 @@
     .fx .stat { display: block; margin-bottom: 3px; opacity: 0.7; font-size: 10.8px; }
   `;
 
+  // ------------------------------------------------------------ crop enhancement
+  function clamp255(v) { return v < 0 ? 0 : v > 255 ? 255 : v | 0; }
+
+  // Live-video crops are often washed out by glare, low contrast and heavy
+  // compression compared with the clean digital scans the database was built
+  // from. A simple percentile luma stretch pulls them back toward full
+  // contrast before identification, without needing a different model.
+  function normalizeCrop(ctx, w, h) {
+    const img = ctx.getImageData(0, 0, w, h);
+    const d = img.data;
+    const n = w * h;
+    const hist = new Uint32Array(256);
+    for (let i = 0; i < n; i++) {
+      const o = i * 4;
+      const y = (0.299 * d[o] + 0.587 * d[o + 1] + 0.114 * d[o + 2]) | 0;
+      hist[y]++;
+    }
+    const cut = n * 0.01; // clip 1% of pixels at each end (ignores glare hot-spots and deep shadow)
+    let lo = 0, acc = 0;
+    for (; lo < 255; lo++) { acc += hist[lo]; if (acc >= cut) break; }
+    let hi = 255; acc = 0;
+    for (; hi > 0; hi--) { acc += hist[hi]; if (acc >= cut) break; }
+    if (hi - lo < 10) return; // degenerate frame (near-solid color); leave it alone
+    const scale = 255 / (hi - lo);
+    for (let i = 0; i < n; i++) {
+      const o = i * 4;
+      d[o]     = clamp255((d[o]     - lo) * scale);
+      d[o + 1] = clamp255((d[o + 1] - lo) * scale);
+      d[o + 2] = clamp255((d[o + 2] - lo) * scale);
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+
   // ------------------------------------------------------------ geometry
   function contentRect(video) {
     const r = video.getBoundingClientRect();
@@ -184,6 +220,7 @@
       this.ids = new Map();    // box key -> identify result
       this.mouse = null;
       this.busy = false;
+      this.voteBuf = [];       // recent identify outcomes for the card area under the cursor
       this.mount();
     }
 
@@ -315,9 +352,32 @@
     hide() {
       this.current = null;
       this.lockFace = null; // the next card gets a fresh lock-on
+      this.voteBuf = [];    // a new card area starts its own vote count
       this.card.style.transitionDelay = '0s';
       this.hl.classList.remove('show');
       this.card.classList.remove('show');
+    }
+
+    // Requires VOTE_MIN_AGREE identify passes (within VOTE_WINDOW_MS, over
+    // roughly the same screen area) to agree on the same card before it's
+    // accepted. A single noisy video frame can misread a card (e.g. two
+    // similar-looking cards); a repeat read on the very next frame rarely
+    // makes the same mistake twice, so this filters most one-off flickers.
+    vote(b, res, ok) {
+      const now = performance.now();
+      const cx = (b.x0 + b.x1) / 2, cy = (b.y0 + b.y1) / 2;
+      this.voteBuf = this.voteBuf.filter((v) => now - v.t < VOTE_WINDOW_MS
+        && Math.abs(v.cx - cx) < VOTE_POS_TOL && Math.abs(v.cy - cy) < VOTE_POS_TOL);
+      this.voteBuf.push({ face: ok ? res.face : -1, cx, cy, t: now });
+      if (this.voteBuf.length > 4) this.voteBuf.shift();
+      const counts = new Map();
+      for (const v of this.voteBuf) {
+        if (v.face < 0) continue;
+        counts.set(v.face, (counts.get(v.face) || 0) + 1);
+      }
+      let bestFace = -1, bestCount = 0;
+      for (const [f, c] of counts) if (c > bestCount) { bestFace = f; bestCount = c; }
+      return { confirmed: ok && bestFace === res.face && bestCount >= VOTE_MIN_AGREE, bestCount };
     }
 
     // the big card leans toward where the mouse sits on the hovered card
@@ -508,6 +568,7 @@
       if (x1 - x0 < 8 || y1 - y0 < 8) return { face: -1 };
       this.cropCtx.imageSmoothingQuality = 'high';
       this.cropCtx.drawImage(this.snap, x0, y0, x1 - x0, y1 - y0, 0, 0, ID_SIZE, ID_SIZE);
+      normalizeCrop(this.cropCtx, ID_SIZE, ID_SIZE);
       const res = await send({ op: 'identify', image: this.crop.toDataURL('image/jpeg', 0.95) });
       return res.error ? { face: -1, error: res.error } : res;
     }
@@ -537,8 +598,9 @@
       const junkOk   = scoreOk && (res.score - res.junk) >= T.junk;
       const marginOk = junkOk  && res.margin >= T.margin;
       const ok = marginOk;
+      const { confirmed, bestCount } = this.vote(b, res, ok);
       this.host.dataset.last = JSON.stringify({
-        box: [b.x0, b.y0, b.x1, b.y1].map(Math.round), ok, face: res.face,
+        box: [b.x0, b.y0, b.x1, b.y1].map(Math.round), ok, confirmed, face: res.face,
         score: res.score, junk: res.junk, title: res.card ? `${res.card.id} ${res.card.n}` : res.top && res.top[0] ? `#${res.top[0].face}` : null,
       });
       // --- diagnostic toast ---
@@ -553,11 +615,14 @@
           msg = tr('dbg_junk', { gap: fmt(res.score - res.junk), min: fmt(T.junk) });
         } else if (!marginOk) {
           msg = tr('dbg_margin', { margin: fmt(res.margin), min: fmt(T.margin) });
+        } else if (!confirmed) {
+          const name = res.card ? res.card.n : `face #${res.face}`;
+          msg = `${name} (${fmt(res.score)}) — waiting for a 2nd matching read (${bestCount}/${VOTE_MIN_AGREE})`;
         } else {
           const name = res.card ? res.card.n : `face #${res.face}`;
           msg = tr('dbg_ok', { name, score: fmt(res.score) });
         }
-        this.toast(msg, ok ? 2500 : 4000);
+        this.toast(msg, confirmed ? 2500 : 4000);
       }
       const cr = contentRect(this.video);
       const pr = this.container.getBoundingClientRect();
@@ -568,16 +633,18 @@
       const bw = (b.x1 - b.x0) * sx;
       const bh = (b.y1 - b.y0) * sy;
       // a new card gets the lock-on: the reticle snaps in without gliding from the last one
-      const lock = ok && settings.highlight && this.lockFace !== res.face;
+      const lock = confirmed && settings.highlight && this.lockFace !== res.face;
       if (lock) {
         this.hl.classList.remove('lock', 'show');
         void this.hl.offsetWidth;
         this.hl.classList.add('lock');
       }
       Object.assign(this.hl.style, { left: `${bx - 3}px`, top: `${by - 3}px`, width: `${bw + 6}px`, height: `${bh + 6}px` });
-      this.hl.classList.toggle('show', settings.highlight && ok);
-      if (!ok) {
-        this.lockFace = null;
+      this.hl.classList.toggle('show', settings.highlight && confirmed);
+      if (!confirmed) {
+        // keep the lock if this was still a passing read, just not yet confirmed
+        // by a second frame — avoids flicker between hide/show while waiting
+        if (!ok) this.lockFace = null;
         this.card.classList.remove('show');
         return;
       }
