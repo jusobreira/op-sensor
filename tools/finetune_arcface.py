@@ -268,7 +268,7 @@ def arcface_loss(embeddings, labels, weight, s=32.0, m=0.5):
 
 # ------------------------------------------------------------------ modelo
 def build_backbone():
-    """MobileNetV3-Large sem cabeça de classificação → 960-dim features."""
+    """MobileNetV3-Large sem cabeça de classificação → 1280-dim features."""
     import timm
     model = timm.create_model(
         "mobilenetv3_large_100.ra_in1k",
@@ -276,7 +276,12 @@ def build_backbone():
         num_classes=0,           # remove classificador
         global_pool="avg",       # pooling global → vetor
     )
-    return model, 960            # dim de saída do MobileNetV3-Large
+    # Descobre a dimensão real de saída do backbone
+    import torch
+    with torch.no_grad():
+        dummy = torch.zeros(1, 3, 224, 224)
+        feat_dim = model(dummy).shape[1]
+    return model, feat_dim       # dim real do MobileNetV3-Large (1280)
 
 
 class EmbedNet(object):
