@@ -390,19 +390,19 @@ def train(args):
     arc_weight = nn.Parameter(torch.randn(num_classes, args.dim, device=device))
     nn.init.xavier_uniform_(arc_weight.data)
 
-    # Otimizador: backbone com LR menor (já pré-treinado), projeção e ArcFace com LR maior
+    # Otimizador: todos os parâmetros com o mesmo LR (backbone precisa se adaptar)
     optim = torch.optim.AdamW([
-        {"params": model.backbone.parameters(), "lr": args.lr * 0.1},
+        {"params": model.backbone.parameters(), "lr": args.lr},
         {"params": model.proj.parameters(),     "lr": args.lr},
         {"params": [arc_weight],                "lr": args.lr},
     ], weight_decay=1e-4)
 
-    # Scheduler: cosine annealing
+    # Scheduler: cosine annealing com LR mínimo de 1e-6
     total_steps = args.epochs * len(tr_dl)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optim, T_max=total_steps)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optim, T_max=total_steps, eta_min=1e-6)
 
-    # Warmup nas primeiras 2 épocas
-    warmup_steps = 2 * len(tr_dl)
+    # Warmup nas primeiras 3 épocas
+    warmup_steps = 3 * len(tr_dl)
 
     os.makedirs(os.path.join(args.out, "models"), exist_ok=True)
     ckpt_path = os.path.join(args.out, "models", "arcface_checkpoint.pt")
@@ -547,7 +547,7 @@ def main():
     ap.add_argument("--epochs",    type=int, default=60, help="Épocas de treino (padrão: 60)")
     ap.add_argument("--batch",     type=int, default=64, help="Batch size (padrão: 64; reduza se der OOM)")
     ap.add_argument("--dim",       type=int, default=512, help="Dimensão do embedding (padrão: 512)")
-    ap.add_argument("--lr",        type=float, default=3e-4, help="Learning rate base (padrão: 3e-4)")
+    ap.add_argument("--lr",        type=float, default=1e-3, help="Learning rate base (padrão: 1e-3)")
     ap.add_argument("--scale",     type=float, default=16.0, help="CosFace scale s (padrão: 16)")
     ap.add_argument("--margin",    type=float, default=0.3,  help="CosFace margin m no cosseno (padrão: 0.3)")
     ap.add_argument("--views",     type=int, default=3, help="Augmentações por carta por época (padrão: 3)")
