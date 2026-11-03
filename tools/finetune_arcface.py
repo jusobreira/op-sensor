@@ -5,7 +5,16 @@ Substitui o embed.onnx genérico (DINOv2-small) por um modelo treinado
 especificamente para distinguir cartas de One Piece — mesmo com brilho,
 perspectiva e qualidade de vídeo baixa.
 
-Tempo estimado: ~1-1.5h numa RTX 2070.
+Tempo estimado: ~4-6h numa RTX 2070 (60 épocas, resnet50, batch 128).
+
+NOTA (02/11): versões anteriores deste script tinham um bug no agendamento
+de learning rate (warmup escrevia sobre pg["lr"] em vez de calcular a
+partir do lr base, e o scheduler encadeado do PyTorch é recursivo — cada
+.step() multiplica o lr atual, não recalcula do zero). Isso colapsava o lr
+para ~0 já nas primeiras dezenas de passos e explicava a loss travada nos
+treinos anteriores (ArcFace scale=32 e CosFace scale=16, ambos ~30-60
+épocas sem a loss cair). Corrigido: o lr agora é calculado explicitamente
+a cada passo (lr_at()), sem scheduler encadeado.
 
 Setup:
     pip install torch torchvision timm onnx onnxruntime pillow numpy
@@ -399,12 +408,23 @@ def train(args):
         {"params": [arc_weight],                "lr": args.lr},
     ], weight_decay=1e-4)
 
-    # Scheduler: cosine annealing com LR mínimo de 1e-6
+    # Agenda de LR calculada explicitamente a passo a passo (sem usar um
+    # scheduler encadeado: o CosineAnnealingLR do PyTorch é RECURSIVO —
+    # cada .step() multiplica o lr ATUAL por um fator, em vez de recalcular
+    # a partir do lr base. Combinado com o warmup escrevendo em pg["lr"]
+    # diretamente, isso fazia o lr colapsar para ~0 já nas primeiras dezenas
+    # de passos e nunca mais se recuperar — a causa real da loss estagnada
+    # nos treinos anteriores (ArcFace e CosFace).
     total_steps = args.epochs * len(tr_dl)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optim, T_max=total_steps, eta_min=1e-6)
+    warmup_steps = 3 * len(tr_dl)   # warmup nas primeiras 3 épocas
+    eta_min = 1e-6
 
-    # Warmup nas primeiras 3 épocas
-    warmup_steps = 3 * len(tr_dl)
+    def lr_at(step):
+        if step < warmup_steps:
+            return args.lr * (step + 1) / warmup_steps
+        t = step - warmup_steps
+        T = max(1, total_steps - warmup_steps)
+        return eta_min + (args.lr - eta_min) * (1 + math.cos(math.pi * min(t, T) / T)) / 2
 
     os.makedirs(os.path.join(args.out, "models"), exist_ok=True)
     ckpt_path = os.path.join(args.out, "models", "arcface_checkpoint.pt")
@@ -422,12 +442,10 @@ def train(args):
         for step, (x, y) in enumerate(tr_dl):
             x, y = x.to(device), y.to(device)
 
-            # warmup linear
             global_step = (epoch - 1) * len(tr_dl) + step
-            if global_step < warmup_steps:
-                lr_scale = (global_step + 1) / warmup_steps
-                for pg in optim.param_groups:
-                    pg["lr"] = pg["lr"] * lr_scale  # simplificado
+            lr = lr_at(global_step)
+            for pg in optim.param_groups:
+                pg["lr"] = lr   # valor absoluto, nunca multiplicado sobre o anterior
 
             optim.zero_grad()
             emb = model(x)
@@ -436,7 +454,6 @@ def train(args):
             torch.nn.utils.clip_grad_norm_(
                 list(model.parameters()) + [arc_weight], max_norm=5.0)
             optim.step()
-            scheduler.step()
             tr_loss += loss.item()
 
         tr_loss /= len(tr_dl)
@@ -462,7 +479,7 @@ def train(args):
             acc = (va_lbls_t[preds] == va_lbls_t).float().mean().item()
 
             flag = " ← melhor!" if acc > best_acc else ""
-            print(f"Época {epoch:3d}/{args.epochs}  loss={tr_loss:.4f}  "
+            print(f"Época {epoch:3d}/{args.epochs}  loss={tr_loss:.4f}  lr={lr:.2e}  "
                   f"val-top1={acc:.1%}  ({elapsed:.0f}s){flag}")
 
             if acc > best_acc:
@@ -478,7 +495,7 @@ def train(args):
                     "arch": args.arch,
                 }, ckpt_path)
         else:
-            print(f"Época {epoch:3d}/{args.epochs}  loss={tr_loss:.4f}  ({elapsed:.0f}s)")
+            print(f"Época {epoch:3d}/{args.epochs}  loss={tr_loss:.4f}  lr={lr:.2e}  ({elapsed:.0f}s)")
 
     print(f"\nMelhor val-top1: {best_acc:.1%} na época {best_epoch}")
     print(f"Checkpoint salvo em: {ckpt_path}")
